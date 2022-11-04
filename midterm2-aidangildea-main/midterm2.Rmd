@@ -1,0 +1,251 @@
+---
+title: "Sta 323 - Midterm 2 - Spring 2022"
+author: "Aidan Gildea"
+output: rmarkdown::html_document
+runtime: shiny
+---
+Due Wednesday, April 20th by 5:00 pm
+
+<br/>
+
+```{r lib}
+library(httr)
+library(rvest)
+library(tidyr)
+library(dplyr)
+library(repurrrsive)
+library(validate)
+library(tibble)
+```
+
+
+
+### Rules
+
+Review all of the rules detailed in `README.md`, if you have any questions please direct them to myself or the TAs.
+
+<br/>
+
+### Task 1 - Figuring out the NY Times Article Search API
+
+``` {r task 1}
+bday_url <- "https://api.nytimes.com/svc/search/v2/articlesearch.json?fq=document_type:article AND print_page:1 AND print_section:A&begin_date=20191115&end_date=20191115&api-key=V7UTIeAubbaAzsibQRlIJ27QE2wweTVz"
+```
+
+* `document_type=` article
+
+* `print_page=` 1
+
+* `print_section=` A
+
+* `fq=` document_type:article AND print_page:1 AND print_section:A
+
+* `begin_date=` 20191115
+
+* `end_date=` 20191115
+
+
+<br/>    
+
+### Task 2 - Getting data from the NY Times Article Search API
+
+To access the appropriate articles from a particular day of interest, we
+can create a get_nyt_articles() function with four parameters: year, month, day, and api_key. To ensure these inputs will function when used in our request to the New York Times API, we begin with a few basic sanity checks. These checks make sure that 1) month is a number between 1 and 12 with length 1, 2) day is a number between 1 and 31 with length 1, and 3) year is a four digit number with length 1. If the inputs pass these conditions, then we can create the individual parts of our NYT API request URL. This includes our base url (which specifies article type, print page 1, and print section A), our begin and end date (in the format YYYYMMDD), and then our api-key. Now we can begin our request to the NYT API. Our request must account for multiple pages of articles (in the case there are more than 10 articles), therefore, we will use a repeat loop that deals with pagination. Beginning at page 0, we will make a request to the API using our URL and then check if the number of articles is less than our page size of 10. If it is more than 10, we will add the articles, increase the page by 1, and repeat the loop; otherwise, we will add the articles and end the loop. To account for the rate limit and timeouts, we suspend execution for 6 seconds each loop - as recommended in the README. If the function determines no articles were found for the specified date, it will cast an error message and return an empty dataframe. Otherwise, it handles the list of articles, using unnest() and hoist() calls to return a final tidy dataframe of the results.
+
+```{r task 2, message=FALSE}
+get_nyt_articles = function(year, month, day, api_key) {
+  
+  # validate user's input for month (value of length 1, between [1, 12])
+  if (length(month) != 1 || month < 1 || month > 12)
+  {
+    validate("Month input must be a number in the range of [1, 12]")
+  }     
+  # validate user's input for day (value of length 1, between [1, 31])
+  if (length(day) != 1 || day < 1 || day > 31)
+  {
+    validate("Day input must be a number in the range of [1, 31]")
+  }     
+  # validate user's input for year (value is numeric, length of 1, has 4 digits)
+  if (!is.numeric(year) || length(year) != 1 || nchar(year) != 4) {
+    validate("Year input must be a four-digit number")
+  }
+  # add leading zero to months less than 10
+  if (month < 10) {
+    month = paste0("0", month)
+  }
+  # add leading zero to days less than 10
+  if (day < 10) {
+    day = paste0("0", day)
+  }
+  # create base url
+  base_url <- "https://api.nytimes.com/svc/search/v2/articlesearch.json?fq=document_type:article AND print_page:1 AND print_section:A&"
+  # specify begin date
+  begin_date <- paste0("begin_date=", year, month, day, "&")
+  # specify end date
+  end_date <- paste0("end_date=", year, month, day, "&")
+  # save user api-key
+  key <- paste0("api-key=", api_key)
+  # create empty list to store results of pagination
+  all_articles=list()
+  # set page initially to 0
+  page = 0
+  # specify NYT API request limit
+  pageSize = 10
+  # create empty dataframe
+  nyt_df = data.frame() %>%
+    add_column(abstract = character(0), web_url = character(0), snippet = character(0), lead_paragraph= character(0), print_section= character(0), print_page= character(0), source= character(0), main_headline= character(0), pub_date= character(0), document_type= character(0), news_desk= character(0), section_name= character(0), main_byline= character(0), type_of_material= character(0), word_count= character(0)) %>%
+    as_tibble()
+  # create function that loops through pages of particular api request
+  repeat{
+    cat("Downloading page", page, "\n")
+    # retrieve information from url based on user inputs
+    url = jsonlite::read_json(URLencode(glue::glue(base_url, "page:{page}&", begin_date, end_date, key)))
+    # retrieve articles from request
+    art_list <-  url$response$docs
+    # check if request is below NYT APT document limit
+    if (length(art_list) < pageSize){
+      # add to article list
+      all_articles = c(all_articles, art_list)
+      # break from repeat loop is less than 10 documents
+      break
+    }
+    # account for timeouts
+    Sys.sleep(6) 
+    # adds next iteration of articles to full list
+    all_articles = c(all_articles, art_list)
+    # advances to next page
+    page = page+1
+  }
+  # checks if no articles were retrieved
+  if (length(all_articles) == 0) {
+    # casts appropriate warning
+    warning("There are no results on the specified date.")
+    # returns an empty dataframe
+    return(nyt_df)
+  }
+  # otherwise, articles were present on specified date
+  else{
+    # create tibble
+    nyt_df <- (nyt_df = tibble::tibble(
+      info = all_articles
+    ))
+    # handle tibble to retrieve variables of interest
+    nyt_tidy <- nyt_df %>%
+      unnest_wider(info) %>%
+      hoist(headline,
+            main_headline = "main", .remove = TRUE) %>%
+      hoist(byline,
+            main_byline = "original") %>%
+      # retrieve extranneous extra data
+      filter(!is.na(web_url))%>%
+      # select variables of interest
+      select(abstract, web_url, snippet, lead_paragraph, print_section, print_page, source, main_headline, pub_date, document_type, news_desk, section_name, main_byline, type_of_material, word_count)
+  }
+  # return tidy data frame
+  return(nyt_tidy)
+}
+```
+
+
+<br/>
+
+### Task 3 - Shiny Front End
+
+This New York Times API shiny app features a side panel where users can input their year, month, and day of interest. Then, after inputting their API key and pressing the search action button, the app will produce a list of headlines from articles on the specified date. The shiny app does so by calling the get_nyt_articles() function created in task 2 when the search action button is pressed. If there are no articles present on that day, the app will output a message indicating so. Otherwise, the server uses a map to create a dynamic list of links labeled by their respective headlines. This dynamic list of actionLinks allows users to then click on the links, prompting a modal dialog box featuring the article's headline, byline, first paragraph, word count, and hyperlink. These modal dialog boxes are conditional on users clicking on the respective headlines (as seen by the use of an observeEvent). By using an uiOutput in the main panel, the app is dynamic and will update its list of articles each time a user changes their inputs and presses the search button. 
+
+```{r}
+# load packages
+library(shiny)
+library(shinythemes)
+library(purrr)
+# create shiny app
+shinyApp(
+  # implement user interface
+  # add theme for aesthetic purposes
+  ui = fluidPage(theme = shinytheme("lumen"),
+                 # name app
+                 titlePanel("NYT Article Database"),
+                 # create side bar panel
+                 sidebarLayout(
+                   sidebarPanel(
+                     # user input for year (max updates based on current year)
+                     numericInput("year","Year", value = 2019, min = 1900, max = format(Sys.Date(), "%Y")),
+                     # user input for month (min of 1, max of 12)
+                     numericInput("month","Month", value = 11, min = 1, 
+                                  max = 12),
+                     # user input for day (min of 1, max of 31)
+                     numericInput("day","Day", value = 15, min = 1, max = 31),
+                     # user input for key
+                     textInput("key", "Enter API Key:", value = "V7UTIeAubbaAzsibQRlIJ27QE2wweTVz"),
+                     # search button that produces corresponding inputs
+                     h4("Retrieve Articles:"),
+                     actionButton("run", "Search"),
+                   ),
+                   mainPanel(
+                     # header in main panel
+                     h3(HTML("<u>Articles<u>")),
+                     # dynamic output of links according to selected date
+                     uiOutput("links")
+                   )
+                 )
+  ),
+  server = function(input, output, session) {
+    state = reactiveValues(
+      observers = list()
+    )
+    
+    # event dependent on user pressing the search button
+    observeEvent(input$run, {
+      # retrieve articles according to selected date
+      articles = get_nyt_articles(input$year, input$month, input$day, input$key)
+      # checks to see if there are no article on corresponding date
+      if(is_empty(articles$web_url)) {
+        # outputs message indicating there are no articles
+        output$links = renderUI(
+          fluidPage("There are no articles on the specified date."))
+        # otherwise, there are articles corresponding to the current date
+      } else {
+        # retrieve headlines from articles
+        headlines <- articles$main_headline
+        
+        # Destroy existing observers
+        for(i in seq_along(state$observers)) {
+          state$observers[[i]]$destroy()
+        }
+        # dynamically create list of articles   
+        ui_elems = map(
+          # sequence length of amount of articles
+          seq_len(length(headlines)), 
+          # create action links per each article
+          function(i) 
+            fluidRow(actionLink(paste0("link",i), paste0("• ", headlines[i])))
+        )
+        # output the links created
+        output$links = renderUI(fluidPage(ui_elems))
+        
+        # Reset and create new observers for each of our links
+        state$observers = map(
+          # sequence length of amount of articles
+          seq_len(length(headlines)), 
+          # create label for each link
+          function(i) {
+            label = paste0("link",i)
+            # event dependent on user selecting particular link
+            observeEvent(input[[label]], ignoreInit = TRUE, {
+              # modal dialog pops up according the selected link
+              showModal(modalDialog(
+                # articles headline as title, byline as subtitle
+                title = HTML(articles$main_headline[i], "<br>", articles$main_byline[i]),
+                # base includes first paragraph of articles, word count, and                         link to full article
+                HTML(articles$lead_paragraph[i], "<br><br>", "Word Count: ", articles$word_count[i], "<br><br>", "Read the full article at ", paste(a(" here.", href= articles$web_url[i]))),
+                # button to close modal dialog
+                footer = modalButton("Close")
+              ))
+            })
+          }
+        )
+      }
+    })
+  }
+)
+```
